@@ -75,6 +75,7 @@ num_notes = 0
 starting_note = 0
 starting_note_pos = 0
 
+# pitch + note guide initialization
 def pitch_exp_setup():
     global exp_k
     global exp_c
