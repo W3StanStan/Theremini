@@ -62,11 +62,44 @@ notes = ["A", "A#/Bb",
          "F", "F#/Gb",
          "G", "G#/Ab"]
 
+exp_c = 0.0
+exp_k = 0.0
+
+min_x = 5
+max_x = cap.get(cv2.CAP_PROP_FRAME_WIDTH) - 5
+
+min_pitch = 120.0
+max_pitch = 1200.0
+
+num_notes = 0
+starting_note = 0
+starting_note_pos = 0
+
+def pitch_exp_setup():
+    global exp_k
+    global exp_c
+    exp_k = math.log((max_pitch / min_pitch), 2) / (max_x - min_x)
+    exp_c = math.log(min_pitch / math.pow(2, min_x * exp_k), 2) / exp_k
+
+    global num_notes
+    global starting_note_pos
+    global starting_note
+    num_notes = round(unrounded_midi_note(max_pitch) - unrounded_midi_note(min_pitch))
+    starting_note_pos = round(get_midi_note_x_coord(unrounded_midi_note(min_pitch)))
+    starting_note = round(unrounded_midi_note(min_pitch))
+    starting_note = round(unrounded_midi_note(min_pitch))
+
+def get_midi_note_x_coord(note):
+    freq = math.pow(2, (note - 69) / 12) * 440
+    return math.log(freq, 2) / exp_k - exp_c
+
 def track_hands(rgb_image, results, landmarks):
+    global cap
     annotated = np.copy(rgb_image)
     # 0. Draw note guide
     if control_points[0][1] < 960:
         draw_note_guide(annotated, control_points[0][1])
+
     for hand_landmarks in results.hand_landmarks:
         h, w, c = annotated.shape
         points = []
@@ -94,8 +127,8 @@ def track_hands(rgb_image, results, landmarks):
         for i in range(len(points) - 1):
            cv2.line(annotated, points[i], points[i + 1], (0, 0, 0), 2)
 
-        cv2.line(annotated, points[len(points) - 2], points[len(points) - 1], (0, 150, 255), 3)
-        cv2.line(annotated, points[len(points) - 1], points[0], (0, 150, 255), 3)
+        cv2.line(annotated, points[len(points) - 2], points[len(points) - 1], (60, 255, 0), 3)
+        cv2.line(annotated, points[len(points) - 1], points[0], (60, 255, 0), 3)
 
         # 4. Draw circles on the joint landmarks
         for i in range(len(points) - 1):
@@ -149,7 +182,26 @@ def audio_callback(outdata, frames, time_info, status):
     outdata[:, 0] = vol * np.sin(phases)
 
 def draw_note_guide(img, y_pos = 0):
-    cv2.line(img, (0,y_pos), (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), y_pos), (150, 150, 150), 2)
+    cv2.line(img, (0,y_pos), (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), y_pos), (60, 255, 0), 3)
+    for i in range(num_notes):
+        note_center_offset = -30
+        if len(notes[(starting_note + 3 + i) % 12]) == 1: note_center_offset = 0
+        cv2.putText(img,
+                    notes[(starting_note + 3 + i) % 12],
+                    (int(get_midi_note_x_coord(starting_note + i) - 10) + note_center_offset, int(y_pos + 60 * (i % 2) - 25)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9,
+                    (0, 0, 0),
+                    8,
+                    cv2.LINE_AA)
+        cv2.putText(img,
+                    notes[(starting_note + 3 + i) % 12],
+                    (int(get_midi_note_x_coord(starting_note + i) - 10) + note_center_offset, int(y_pos + 60 * (i % 2) - 25)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9,
+                    (255, 255, 255),
+                    2,
+                    cv2.LINE_AA)
 
 
 # Start the hardware stream
@@ -163,9 +215,15 @@ stream = sd.OutputStream(
 def clamp(n, min_val, max_val):
     return max(min_val, min(n, max_val))
 
-def main():
+def unrounded_midi_note(freq):
+    return 12 * math.log(max(0.000001, freq / 440.0), 2) + 69
 
+def main():
+    global stream
+
+    pitch_exp_setup()
     stream.start()
+    print(get_midi_note_x_coord(69))
 
     try:
         while cap.isOpened():
@@ -188,10 +246,10 @@ def main():
 
             annotated_img = track_hands(mp_img.numpy_view(), results, PINCHER_LANDMARKS)
 
-            frequency_input = math.pow(2, (control_points[0][0] + 4381.5) / 625.3)
+            frequency_input = math.pow(2, (control_points[0][0] + exp_c) * exp_k)
             volume_input = 1.0 - ((clamp(control_points[1][1], 216, 864) - 216) / 648)
 
-            audio_state['target_frequency'] = clamp(frequency_input, 130, 2000)
+            audio_state['target_frequency'] = clamp(frequency_input, min_pitch, max_pitch)
             audio_state['target_volume'] = volume_input
 
             final_img = cv2.cvtColor(annotated_img, cv2.COLOR_RGB2BGR)
@@ -199,24 +257,30 @@ def main():
             volume_text = int(audio_state['current_volume'] * 100)
             pitch_text = int(audio_state['current_frequency'])
 
-            raw_note = round(12 * math.log(max(1.0, audio_state['current_frequency']) / 440.0, 2) + 69, 1)
+            raw_note = round(unrounded_midi_note(audio_state['current_frequency']))
             note_letter = notes[(round(raw_note) + 3) % 12]
             octave = 4 + (round(raw_note) - 60) // 12
 
             #display volume
-            cv2.putText(final_img, f"{volume_text}%", control_points[1], cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(final_img, f"{volume_text}%", control_points[1], cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 0), 12, cv2.LINE_AA)
+            cv2.putText(final_img, f"{volume_text}%", control_points[1], cv2.FONT_HERSHEY_SIMPLEX, 1.5, (60, 255, 0), 2, cv2.LINE_AA)
 
             #display pitch
-            cv2.putText(final_img, f"{pitch_text} Hz", control_points[0], cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(final_img, f"{pitch_text} Hz", control_points[0], cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 0), 12, cv2.LINE_AA)
+            cv2.putText(final_img, f"{pitch_text} Hz", control_points[0], cv2.FONT_HERSHEY_SIMPLEX, 1.5, (60, 255, 0), 2, cv2.LINE_AA)
 
             #display closest note on 12 tone scale
             if len(note_letter) == 1:
                 cv2.putText(final_img, f"{note_letter}{octave}", (control_points[0][0], control_points[0][1] - 55),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 2, cv2.LINE_AA)
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 0), 12, cv2.LINE_AA)
+                cv2.putText(final_img, f"{note_letter}{octave}", (control_points[0][0], control_points[0][1] - 55),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.5, (60, 255, 0), 2, cv2.LINE_AA)
             else:
                 accidental_note_letters = f"{note_letter[:2]}{octave}{note_letter[2:]}{octave}"
                 cv2.putText(final_img, accidental_note_letters, (control_points[0][0], control_points[0][1] - 55),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 2, cv2.LINE_AA)
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 0), 12, cv2.LINE_AA)
+                cv2.putText(final_img, accidental_note_letters, (control_points[0][0], control_points[0][1] - 55),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.5, (60, 255, 0), 2, cv2.LINE_AA)
 
             cv2.imshow("Theremin", final_img)
 
